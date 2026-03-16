@@ -58,13 +58,14 @@ func registerOne(workerID int, tag string, proxy, outputFile, defaultDomain stri
 
 // RunBatch runs concurrent registration tasks with retry until target success count is reached.
 func RunBatch(totalAccounts int, outputFile string, maxWorkers int, proxy, defaultDomain string) {
+	const maxRetries = 3
+
 	var printMu sync.Mutex
 	var fileMu sync.Mutex
 
 	var remaining int64 = int64(totalAccounts)
 	var successCount int64
 	var failureCount int64
-	var attemptNum int64
 
 	startTime := time.Now()
 
@@ -80,10 +81,26 @@ func RunBatch(totalAccounts int, outputFile string, maxWorkers int, proxy, defau
 					return
 				}
 
-				attempt := atomic.AddInt64(&attemptNum, 1)
-				tag := fmt.Sprintf("%d/%d", attempt, totalAccounts)
+				cur := atomic.LoadInt64(&successCount) + 1
+				tag := fmt.Sprintf("%d/%d", cur, totalAccounts)
 
-				success, emailAddr, errStr := registerOne(workerID, tag, proxy, outputFile, defaultDomain, &printMu, &fileMu)
+				var success bool
+				var emailAddr, errStr string
+				for retry := 0; retry <= maxRetries; retry++ {
+					if retry > 0 {
+						printMu.Lock()
+						ts := time.Now().Format("15:04:05")
+						fmt.Printf("[%s] [W%d] Retry %d/%d for slot %s\n", ts, workerID, retry, maxRetries, tag)
+						printMu.Unlock()
+						time.Sleep(time.Duration(retry) * 2 * time.Second)
+					}
+
+					success, emailAddr, errStr = registerOne(workerID, tag, proxy, outputFile, defaultDomain, &printMu, &fileMu)
+					if success {
+						break
+					}
+				}
+
 				if success {
 					atomic.AddInt64(&successCount, 1)
 					ts := time.Now().Format("15:04:05")
@@ -96,7 +113,7 @@ func RunBatch(totalAccounts int, outputFile string, maxWorkers int, proxy, defau
 					ts := time.Now().Format("15:04:05")
 
 					printMu.Lock()
-					fmt.Printf("[%s] [W%d] FAILURE: %s | %s\n", ts, workerID, emailAddr, errStr)
+					fmt.Printf("[%s] [W%d] FAILED after %d retries: %s | %s\n", ts, workerID, maxRetries, emailAddr, errStr)
 					printMu.Unlock()
 				}
 			}
@@ -111,7 +128,6 @@ func RunBatch(totalAccounts int, outputFile string, maxWorkers int, proxy, defau
 	fmt.Printf("\n--- Batch Registration Summary ---\n")
 	fmt.Printf("Target:    %d\n", totalAccounts)
 	fmt.Printf("Success:   %d\n", successCount)
-	fmt.Printf("Attempts:  %d\n", attemptNum)
 	fmt.Printf("Failures:  %d\n", failureCount)
 	fmt.Printf("Elapsed:   %s\n", elapsedStr)
 	fmt.Printf("Output:    %s (email|apiKey)\n", outputFile)

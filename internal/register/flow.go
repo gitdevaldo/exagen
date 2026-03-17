@@ -300,10 +300,15 @@ func (c *Client) RunRegister(emailAddr, vcrcsCookie string) error {
 		return fmt.Errorf("auth callback failed: %w", err)
 	}
 
-	// Step 8: Visit dashboard to establish dashboard-specific cookies
+	// Step 8: Visit dashboard / handle Vercel challenge
 	c.randomDelay(1.0, 2.0)
-	if err := c.visitDashboard(); err != nil {
-		return fmt.Errorf("visit dashboard failed: %w", err)
+	if vcrcsCookie != "" {
+		// Cookie provided, skip dashboard page visit and go straight to API
+		c.print("Using provided Vercel cookie, skipping dashboard page visit")
+	} else {
+		if err := c.visitDashboard(); err != nil {
+			return fmt.Errorf("visit dashboard failed: %w", err)
+		}
 	}
 
 	// Step 9: Complete onboarding

@@ -2,3 +2,4 @@ results.txt
 .env
 *.exe
 nul
+node_modules/

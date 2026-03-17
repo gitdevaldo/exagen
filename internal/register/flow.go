@@ -312,8 +312,6 @@ func (c *Client) visitDashboard() error {
 	if err != nil {
 		return fmt.Errorf("visit dashboard request failed: %w", err)
 	}
-
-	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 
 	c.log("Visit Dashboard", resp.StatusCode)
@@ -322,48 +320,15 @@ func (c *Client) visitDashboard() error {
 		return nil
 	}
 
-	// Vercel challenge detected - extract token from response
-	c.print("Vercel challenge detected, looking for token...")
-
-	// Check for challenge token in response headers
+	// Extract challenge token from response header
 	challengeToken := resp.Header.Get("x-vercel-challenge-token")
-
-	// If not in headers, try to extract from HTML body
 	if challengeToken == "" {
-		token, err := vercel.ExtractChallengeToken(string(body))
-		if err != nil {
-			// Token might be served by the JS file, try fetching it
-			c.print("Token not in HTML, fetching challenge JS...")
-
-			jsReq, _ := http.NewRequest("GET", dashboardURL+"/.well-known/vercel/security/static/challenge.v2.min.js", nil)
-			jsReq.Header.Set("Accept", "*/*")
-			jsReq.Header.Set("Referer", dashboardURL+"/")
-
-			jsResp, err := c.do(jsReq)
-			if err != nil {
-				return fmt.Errorf("failed to fetch challenge JS: %w", err)
-			}
-			jsBody, _ := io.ReadAll(jsResp.Body)
-			jsResp.Body.Close()
-
-			c.log("Fetch Challenge JS", jsResp.StatusCode)
-
-			// Try extracting token from JS response
-			token, err = vercel.ExtractChallengeToken(string(jsBody))
-			if err != nil {
-				// Last resort: check cookies for the token
-				c.print(fmt.Sprintf("Could not extract token. HTML body (first 500 chars): %s", truncateBody(string(body), 500)))
-				return fmt.Errorf("failed to extract vercel challenge token from any source")
-			}
-			challengeToken = token
-		} else {
-			challengeToken = token
-		}
+		return fmt.Errorf("vercel 429 but no x-vercel-challenge-token header found")
 	}
 
-	c.print(fmt.Sprintf("Got challenge token (len=%d), solving...", len(challengeToken)))
+	c.print(fmt.Sprintf("Vercel challenge token received (len=%d), solving...", len(challengeToken)))
 
-	// Solve the proof-of-work challenge
+	// Solve the proof-of-work
 	solution, err := vercel.SolveChallenge(challengeToken)
 	if err != nil {
 		return fmt.Errorf("failed to solve vercel challenge: %w", err)
@@ -395,7 +360,7 @@ func (c *Client) visitDashboard() error {
 		return fmt.Errorf("vercel challenge submission failed (status %d)", submitResp.StatusCode)
 	}
 
-	c.print("Vercel challenge passed, visiting dashboard...")
+	c.print("Vercel challenge passed!")
 
 	// Retry dashboard with the _vcrcs cookie
 	c.randomDelay(0.5, 1.0)

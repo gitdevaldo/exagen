@@ -36,7 +36,7 @@ func SolveChallenge(challengeToken string) (string, error) {
 	}
 
 	suffix := fields[1]
-	currentHash := fields[2]
+	startHash := fields[2]
 	iterations := 0
 	fmt.Sscanf(fields[3], "%d", &iterations)
 
@@ -44,17 +44,26 @@ func SolveChallenge(challengeToken string) (string, error) {
 		return "", fmt.Errorf("invalid iterations count: %d", iterations)
 	}
 
+	// The prefix length to match -- use the suffix length as a hint
+	// The suffix is typically 8 hex chars, and the prefix to match is also 8 chars
+	prefixLen := len(suffix)
+	if prefixLen > len(startHash) {
+		prefixLen = len(startHash)
+	}
+
+	currentPrefix := startHash[:prefixLen]
+
 	keys := make([]string, 0, iterations)
 	r := rand.New(rand.NewSource(time.Now().UnixNano()))
 
 	for i := 0; i < iterations; i++ {
-		key, hash, err := findMatchingKey(suffix, currentHash, r)
+		key, hash, err := findMatchingKey(suffix, currentPrefix, r)
 		if err != nil {
 			return "", fmt.Errorf("failed at iteration %d: %w", i, err)
 		}
 		keys = append(keys, key)
-		// Next prefix is the tail of the hash, same length as currentHash
-		currentHash = hash[len(hash)-len(currentHash):]
+		// Next prefix is from the tail of the hash
+		currentPrefix = hash[len(hash)-prefixLen:]
 	}
 
 	return strings.Join(keys, ";"), nil

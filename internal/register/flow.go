@@ -285,12 +285,36 @@ func (c *Client) RunRegister(emailAddr string) error {
 		return fmt.Errorf("auth callback failed: %w", err)
 	}
 
-	// Step 8: Complete onboarding
+	// Step 8: Visit dashboard to establish dashboard-specific cookies
+	c.randomDelay(1.0, 2.0)
+	if err := c.visitDashboard(); err != nil {
+		return fmt.Errorf("visit dashboard failed: %w", err)
+	}
+
+	// Step 9: Complete onboarding
 	c.randomDelay(2.0, 4.0)
 	if err := c.completeOnboarding(); err != nil {
 		return fmt.Errorf("onboarding failed: %w", err)
 	}
 
+	return nil
+}
+
+// visitDashboard visits dashboard.exa.ai to establish dashboard-specific cookies
+// (__Host-next-auth.csrf-token, __Secure-next-auth.callback-url, _vcrcs).
+func (c *Client) visitDashboard() error {
+	req, _ := http.NewRequest("GET", dashboardURL+"/", nil)
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
+	req.Header.Set("Referer", authURL+"/")
+	req.Header.Set("Upgrade-Insecure-Requests", "1")
+
+	resp, err := c.do(req)
+	if err != nil {
+		return fmt.Errorf("visit dashboard request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	c.log("Visit Dashboard", resp.StatusCode)
 	return nil
 }
 

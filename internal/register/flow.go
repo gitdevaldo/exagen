@@ -301,7 +301,7 @@ func (c *Client) RunRegister(emailAddr string) error {
 	return nil
 }
 
-// visitDashboard visits dashboard.exa.ai and solves the Vercel challenge if needed.
+// visitDashboard visits dashboard.exa.ai and solves the Vercel v2 challenge if needed.
 func (c *Client) visitDashboard() error {
 	req, _ := http.NewRequest("GET", dashboardURL+"/", nil)
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
@@ -318,58 +318,99 @@ func (c *Client) visitDashboard() error {
 
 	c.log("Visit Dashboard", resp.StatusCode)
 
-	if resp.StatusCode == 429 {
-		// Vercel challenge detected, solve it
-		c.print("Vercel challenge detected, solving...")
-
-		token, err := vercel.ExtractChallengeToken(string(body))
-		if err != nil {
-			return fmt.Errorf("failed to extract vercel challenge token: %w (body: %s)", err, truncateBody(string(body), 300))
-		}
-
-		solution, err := vercel.SolveChallenge(token)
-		if err != nil {
-			return fmt.Errorf("failed to solve vercel challenge: %w", err)
-		}
-
-		c.print("Challenge solved, submitting...")
-
-		// Submit the solution
-		submitReq, _ := http.NewRequest("POST", dashboardURL+"/.well-known/vercel/security/request-challenge", nil)
-		submitReq.Header.Set("x-vercel-challenge-token", token)
-		submitReq.Header.Set("x-vercel-challenge-solution", solution)
-		submitReq.Header.Set("Accept", "*/*")
-		submitReq.Header.Set("Origin", dashboardURL)
-		submitReq.Header.Set("Referer", dashboardURL+"/")
-
-		submitResp, err := c.do(submitReq)
-		if err != nil {
-			return fmt.Errorf("vercel challenge submission failed: %w", err)
-		}
-		submitResp.Body.Close()
-
-		c.log("Vercel Challenge Submit", submitResp.StatusCode)
-
-		if submitResp.StatusCode != 204 && submitResp.StatusCode != 200 {
-			return fmt.Errorf("vercel challenge submission failed (status %d)", submitResp.StatusCode)
-		}
-
-		// Now retry visiting dashboard with the _vcrcs cookie set
-		c.randomDelay(0.5, 1.0)
-		retryReq, _ := http.NewRequest("GET", dashboardURL+"/", nil)
-		retryReq.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
-		retryReq.Header.Set("Referer", authURL+"/")
-		retryReq.Header.Set("Upgrade-Insecure-Requests", "1")
-
-		retryResp, err := c.do(retryReq)
-		if err != nil {
-			return fmt.Errorf("dashboard retry after challenge failed: %w", err)
-		}
-		retryResp.Body.Close()
-
-		c.log("Visit Dashboard (after challenge)", retryResp.StatusCode)
+	if resp.StatusCode != 429 {
+		return nil
 	}
 
+	// Vercel challenge detected - extract token from response
+	c.print("Vercel challenge detected, looking for token...")
+
+	// Check for challenge token in response headers
+	challengeToken := resp.Header.Get("x-vercel-challenge-token")
+
+	// If not in headers, try to extract from HTML body
+	if challengeToken == "" {
+		token, err := vercel.ExtractChallengeToken(string(body))
+		if err != nil {
+			// Token might be served by the JS file, try fetching it
+			c.print("Token not in HTML, fetching challenge JS...")
+
+			jsReq, _ := http.NewRequest("GET", dashboardURL+"/.well-known/vercel/security/static/challenge.v2.min.js", nil)
+			jsReq.Header.Set("Accept", "*/*")
+			jsReq.Header.Set("Referer", dashboardURL+"/")
+
+			jsResp, err := c.do(jsReq)
+			if err != nil {
+				return fmt.Errorf("failed to fetch challenge JS: %w", err)
+			}
+			jsBody, _ := io.ReadAll(jsResp.Body)
+			jsResp.Body.Close()
+
+			c.log("Fetch Challenge JS", jsResp.StatusCode)
+
+			// Try extracting token from JS response
+			token, err = vercel.ExtractChallengeToken(string(jsBody))
+			if err != nil {
+				// Last resort: check cookies for the token
+				c.print(fmt.Sprintf("Could not extract token. HTML body (first 500 chars): %s", truncateBody(string(body), 500)))
+				return fmt.Errorf("failed to extract vercel challenge token from any source")
+			}
+			challengeToken = token
+		} else {
+			challengeToken = token
+		}
+	}
+
+	c.print(fmt.Sprintf("Got challenge token (len=%d), solving...", len(challengeToken)))
+
+	// Solve the proof-of-work challenge
+	solution, err := vercel.SolveChallenge(challengeToken)
+	if err != nil {
+		return fmt.Errorf("failed to solve vercel challenge: %w", err)
+	}
+
+	c.print(fmt.Sprintf("Challenge solved: %s", solution))
+
+	// Submit the solution
+	submitReq, _ := http.NewRequest("POST", dashboardURL+"/.well-known/vercel/security/request-challenge", nil)
+	submitReq.Header.Set("x-vercel-challenge-token", challengeToken)
+	submitReq.Header.Set("x-vercel-challenge-solution", solution)
+	submitReq.Header.Set("x-vercel-challenge-version", "2")
+	submitReq.Header.Set("Accept", "*/*")
+	submitReq.Header.Set("Origin", dashboardURL)
+	submitReq.Header.Set("Referer", dashboardURL+"/.well-known/vercel/security/static/challenge.v2.min.js")
+	submitReq.Header.Set("Sec-Fetch-Dest", "empty")
+	submitReq.Header.Set("Sec-Fetch-Mode", "cors")
+	submitReq.Header.Set("Sec-Fetch-Site", "same-origin")
+
+	submitResp, err := c.do(submitReq)
+	if err != nil {
+		return fmt.Errorf("vercel challenge submission failed: %w", err)
+	}
+	submitResp.Body.Close()
+
+	c.log("Vercel Challenge Submit", submitResp.StatusCode)
+
+	if submitResp.StatusCode != 204 && submitResp.StatusCode != 200 {
+		return fmt.Errorf("vercel challenge submission failed (status %d)", submitResp.StatusCode)
+	}
+
+	c.print("Vercel challenge passed, visiting dashboard...")
+
+	// Retry dashboard with the _vcrcs cookie
+	c.randomDelay(0.5, 1.0)
+	retryReq, _ := http.NewRequest("GET", dashboardURL+"/", nil)
+	retryReq.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
+	retryReq.Header.Set("Referer", authURL+"/")
+	retryReq.Header.Set("Upgrade-Insecure-Requests", "1")
+
+	retryResp, err := c.do(retryReq)
+	if err != nil {
+		return fmt.Errorf("dashboard retry after challenge failed: %w", err)
+	}
+	retryResp.Body.Close()
+
+	c.log("Visit Dashboard (after challenge)", retryResp.StatusCode)
 	return nil
 }
 

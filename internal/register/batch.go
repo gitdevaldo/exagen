@@ -12,7 +12,7 @@ import (
 )
 
 // registerOne handles a single account registration.
-func registerOne(workerID int, tag string, proxy, outputFile, defaultDomain, vcrcsCookie string, printMu, fileMu *sync.Mutex) (bool, string, string) {
+func registerOne(workerID int, tag string, proxy, outputFile, defaultDomain string, printMu, fileMu *sync.Mutex) (bool, string, string) {
 	client, err := NewClient(proxy, tag, workerID, printMu, fileMu)
 	if err != nil {
 		return false, "", fmt.Sprintf("failed to create client: %v", err)
@@ -25,20 +25,12 @@ func registerOne(workerID int, tag string, proxy, outputFile, defaultDomain, vcr
 
 	client.print(fmt.Sprintf("Starting registration for %s", emailAddr))
 
-	err = client.RunRegister(emailAddr, vcrcsCookie)
+	err = client.RunRegister(emailAddr)
 	if err != nil {
 		return false, emailAddr, err.Error()
 	}
 
-	// Retrieve API key after registration
-	client.randomDelay(0.5, 1.0)
-	apiKey, err := client.GetAPIKey()
-	if err != nil {
-		client.print(fmt.Sprintf("Warning: failed to get API key: %v", err))
-		apiKey = ""
-	}
-
-	// Append to file: email|apiKey
+	// Append to file: email
 	fileMu.Lock()
 	defer fileMu.Unlock()
 
@@ -48,7 +40,7 @@ func registerOne(workerID int, tag string, proxy, outputFile, defaultDomain, vcr
 	}
 	defer f.Close()
 
-	line := fmt.Sprintf("%s|%s\n", emailAddr, apiKey)
+	line := fmt.Sprintf("%s\n", emailAddr)
 	if _, err := f.WriteString(line); err != nil {
 		return false, emailAddr, fmt.Sprintf("failed to write to output file: %v", err)
 	}
@@ -57,7 +49,7 @@ func registerOne(workerID int, tag string, proxy, outputFile, defaultDomain, vcr
 }
 
 // RunBatch runs concurrent registration tasks until target success count is reached.
-func RunBatch(totalAccounts int, outputFile string, maxWorkers int, proxy, defaultDomain, vcrcsCookie string) {
+func RunBatch(totalAccounts int, outputFile string, maxWorkers int, proxy, defaultDomain string) {
 	var printMu sync.Mutex
 	var fileMu sync.Mutex
 
@@ -82,7 +74,7 @@ func RunBatch(totalAccounts int, outputFile string, maxWorkers int, proxy, defau
 				cur := atomic.LoadInt64(&successCount) + 1
 				tag := fmt.Sprintf("%d/%d", cur, totalAccounts)
 
-				success, emailAddr, errStr := registerOne(workerID, tag, proxy, outputFile, defaultDomain, vcrcsCookie, &printMu, &fileMu)
+				success, emailAddr, errStr := registerOne(workerID, tag, proxy, outputFile, defaultDomain, &printMu, &fileMu)
 				if success {
 					atomic.AddInt64(&successCount, 1)
 					ts := time.Now().Format("15:04:05")
@@ -123,7 +115,7 @@ func RunBatch(totalAccounts int, outputFile string, maxWorkers int, proxy, defau
 	fmt.Printf("Success:   %d\n", successCount)
 	fmt.Printf("Failures:  %d\n", failureCount)
 	fmt.Printf("Elapsed:   %s\n", elapsedStr)
-	fmt.Printf("Output:    %s (email|apiKey)\n", outputFile)
+	fmt.Printf("Output:    %s\n", outputFile)
 	fmt.Printf("----------------------------------\n")
 }
 

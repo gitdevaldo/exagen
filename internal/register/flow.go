@@ -137,16 +137,8 @@ func (c *Client) signinEmail(emailAddr, csrf string) error {
 	return nil
 }
 
-// verifyOTPResponse holds the response from the OTP verification endpoint.
-type verifyOTPResponse struct {
-	RedirectURL string `json:"redirectUrl"`
-	Email       string `json:"email"`
-	HashedOtp   string `json:"hashedOtp"`
-	RawOtp      string `json:"rawOtp"`
-}
-
 // verifyOTP submits the OTP code to auth.exa.ai for verification.
-func (c *Client) verifyOTP(emailAddr, code string) (*verifyOTPResponse, error) {
+func (c *Client) verifyOTP(emailAddr, code string) error {
 	payload := map[string]string{
 		"email": emailAddr,
 		"otp":   code,
@@ -161,7 +153,7 @@ func (c *Client) verifyOTP(emailAddr, code string) (*verifyOTPResponse, error) {
 
 	resp, err := c.do(req)
 	if err != nil {
-		return nil, fmt.Errorf("verify otp request failed: %w", err)
+		return fmt.Errorf("verify otp request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -169,77 +161,15 @@ func (c *Client) verifyOTP(emailAddr, code string) (*verifyOTPResponse, error) {
 	c.log(fmt.Sprintf("Verify OTP [%s]", code), resp.StatusCode)
 
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("verify otp failed (status %d): %s", resp.StatusCode, truncateBody(string(body), 200))
+		return fmt.Errorf("verify otp failed (status %d): %s", resp.StatusCode, truncateBody(string(body), 200))
 	}
 
-	var data verifyOTPResponse
-	if err := json.Unmarshal(body, &data); err != nil {
-		return nil, fmt.Errorf("failed to parse verify otp response: %w", err)
-	}
-
-	return &data, nil
+	return nil
 }
 
-// authCallback calls the NextAuth email callback to establish the session cookie.
-// This bridges auth.exa.ai -> dashboard.exa.ai by setting next-auth.session-token.
-func (c *Client) authCallback(emailAddr, hashedOtp, rawOtp string) error {
-	// Token format: {hashedOtp}:{rawOtp}
-	token := hashedOtp + ":" + rawOtp
-
-	params := url.Values{}
-	params.Set("email", emailAddr)
-	params.Set("token", token)
-	params.Set("callbackUrl", callbackURL)
-
-	cbURL := authURL + "/api/auth/callback/email?" + params.Encode()
-
-	for attempt := 0; attempt < 3; attempt++ {
-		if attempt > 0 {
-			c.randomDelay(float64(attempt*3), float64(attempt*5))
-		}
-
-		req, _ := http.NewRequest("GET", cbURL, nil)
-		req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-		req.Header.Set("Referer", authURL+"/")
-		req.Header.Set("Upgrade-Insecure-Requests", "1")
-
-		resp, err := c.do(req)
-		if err != nil {
-			return fmt.Errorf("auth callback request failed: %w", err)
-		}
-		resp.Body.Close()
-
-		c.log("Auth Callback", resp.StatusCode)
-
-		if resp.StatusCode == 200 || resp.StatusCode == 302 {
-			return nil
-		}
-		if resp.StatusCode != 429 {
-			return fmt.Errorf("auth callback failed (status %d)", resp.StatusCode)
-		}
-		c.print(fmt.Sprintf("Auth callback rate limited, waiting before retry %d/3...", attempt+1))
-	}
-
-	return fmt.Errorf("auth callback failed after 3 retries (rate limited)")
-}
-
-// RunRegister performs the full exa.ai registration flow.
-func (c *Client) RunRegister(emailAddr, vcrcsCookie string) error {
+// RunRegister performs the exa.ai registration flow: signup + OTP verification.
+func (c *Client) RunRegister(emailAddr string) error {
 	c.print("Starting registration flow...")
-
-	// Inject _vcrcs cookie for dashboard.exa.ai if provided
-	if vcrcsCookie != "" {
-		dashURL, _ := url.Parse(dashboardURL)
-		c.session.GetCookieJar().SetCookies(dashURL, []*http.Cookie{
-			{
-				Name:   "_vcrcs",
-				Value:  vcrcsCookie,
-				Domain: "dashboard.exa.ai",
-				Path:   "/",
-			},
-		})
-		c.print("Injected Vercel _vcrcs cookie")
-	}
 
 	// Step 1: Visit exa.ai homepage to initialize session
 	if err := c.visitHomepage(); err != nil {
@@ -275,8 +205,7 @@ func (c *Client) RunRegister(emailAddr, vcrcsCookie string) error {
 
 	// Step 6: Verify OTP
 	c.randomDelay(0.3, 0.8)
-	otpResp, err := c.verifyOTP(emailAddr, otpCode)
-	if err != nil {
+	if err := c.verifyOTP(emailAddr, otpCode); err != nil {
 		// Retry once on failure
 		c.print("OTP verification failed, retrying...")
 		c.randomDelay(2.0, 4.0)
@@ -287,153 +216,12 @@ func (c *Client) RunRegister(emailAddr, vcrcsCookie string) error {
 		}
 
 		c.randomDelay(0.3, 0.8)
-		otpResp, err = c.verifyOTP(emailAddr, otpCode)
-		if err != nil {
+		if err := c.verifyOTP(emailAddr, otpCode); err != nil {
 			return fmt.Errorf("otp verification failed after retry: %w", err)
 		}
 	}
 
-	// Step 7: Auth callback to establish dashboard session cookie
-	c.randomDelay(2.0, 4.0)
-	if err := c.authCallback(emailAddr, otpResp.HashedOtp, otpResp.RawOtp); err != nil {
-		return fmt.Errorf("auth callback failed: %w", err)
-	}
-
-	// Step 8: Visit dashboard (may trigger Vercel challenge)
-	c.randomDelay(1.0, 2.0)
-	if err := c.visitDashboard(); err != nil {
-		return fmt.Errorf("visit dashboard failed: %w", err)
-	}
-
-	// Step 9: Complete onboarding
-	c.randomDelay(2.0, 4.0)
-	if err := c.completeOnboarding(); err != nil {
-		return fmt.Errorf("onboarding failed: %w", err)
-	}
-
 	return nil
-}
-
-// visitDashboard visits dashboard.exa.ai.
-func (c *Client) visitDashboard() error {
-	req, _ := http.NewRequest("GET", dashboardURL+"/", nil)
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
-	req.Header.Set("Referer", authURL+"/")
-	req.Header.Set("Upgrade-Insecure-Requests", "1")
-
-	resp, err := c.do(req)
-	if err != nil {
-		return fmt.Errorf("visit dashboard request failed: %w", err)
-	}
-	resp.Body.Close()
-
-	c.log("Visit Dashboard", resp.StatusCode)
-
-	if resp.StatusCode == 429 {
-		return fmt.Errorf("dashboard returned 429 (Vercel bot protection)")
-	}
-
-	return nil
-}
-
-// completeOnboarding submits the onboarding form on dashboard.exa.ai.
-func (c *Client) completeOnboarding() error {
-	payload := map[string]string{
-		"codingTool":     "claude",
-		"framework":      "mcp",
-		"useCase":        "coding-agent",
-		"prompt":         "using in coding agent",
-		"latencyProfile": "auto",
-		"contentType":    "compact",
-	}
-	jsonPayload, _ := json.Marshal(payload)
-
-	req, _ := http.NewRequest("POST", dashboardURL+"/api/onboarding/complete", strings.NewReader(string(jsonPayload)))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "*/*")
-	req.Header.Set("Referer", dashboardURL+"/onboarding")
-	req.Header.Set("Origin", dashboardURL)
-
-	resp, err := c.do(req)
-	if err != nil {
-		return fmt.Errorf("onboarding request failed: %w", err)
-	}
-
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-
-	c.log("Complete Onboarding", resp.StatusCode)
-
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("onboarding failed (status %d): %s", resp.StatusCode, truncateBody(string(body), 200))
-	}
-
-	return nil
-}
-
-// GetAPIKey retrieves the API key from dashboard.exa.ai (public wrapper).
-func (c *Client) GetAPIKey() (string, error) {
-	return c.getAPIKey()
-}
-
-func (c *Client) getAPIKey() (string, error) {
-	req, _ := http.NewRequest("GET", dashboardURL+"/api/get-api-keys", nil)
-	req.Header.Set("Accept", "*/*")
-	req.Header.Set("Referer", dashboardURL+"/")
-
-	resp, err := c.do(req)
-	if err != nil {
-		return "", fmt.Errorf("get api keys request failed: %w", err)
-	}
-
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-
-	c.log("Get API Keys", resp.StatusCode)
-
-	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("get api keys failed (status %d): %s", resp.StatusCode, truncateBody(string(body), 200))
-	}
-
-	var data struct {
-		APIKeys []struct {
-			ID string `json:"id"`
-		} `json:"apiKeys"`
-	}
-	if err := json.Unmarshal(body, &data); err != nil {
-		return "", fmt.Errorf("failed to parse api keys response: %w", err)
-	}
-
-	if len(data.APIKeys) == 0 {
-		return "", fmt.Errorf("no api keys found in response")
-	}
-
-	return data.APIKeys[0].ID, nil
-}
-
-// getSessionToken extracts the next-auth.session-token from the cookie jar.
-func (c *Client) getSessionToken() string {
-	dashURL, _ := url.Parse(dashboardURL)
-	for _, cookie := range c.session.GetCookieJar().Cookies(dashURL) {
-		if cookie.Name == "next-auth.session-token" {
-			return cookie.Value
-		}
-	}
-	// Also check auth domain
-	authU, _ := url.Parse(authURL)
-	for _, cookie := range c.session.GetCookieJar().Cookies(authU) {
-		if cookie.Name == "next-auth.session-token" {
-			return cookie.Value
-		}
-	}
-	// Check .exa.ai domain
-	rootURL, _ := url.Parse(baseURL)
-	for _, cookie := range c.session.GetCookieJar().Cookies(rootURL) {
-		if cookie.Name == "next-auth.session-token" {
-			return cookie.Value
-		}
-	}
-	return ""
 }
 
 func (c *Client) randomDelay(low, high float64) {

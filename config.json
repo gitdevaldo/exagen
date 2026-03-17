@@ -1,6 +1,5 @@
 {
   "proxy": "",
   "output_file": "results.txt",
-  "default_domain": "affos.biz.id",
-  "vcrcs_cookie": "1.1773751877.3600.ZWQyZGQ1MmI1ZjVjNjcyOGI3YmZmYWM1OTFjNTg0OWI=.361976e35f08dc0f179daf01b11d3239"
+  "default_domain": ""
 }

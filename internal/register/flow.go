@@ -31,7 +31,7 @@ func (c *Client) visitHomepage() error {
 			return err
 		}
 
-		c.log(fmt.Sprintf("Visit Homepage (Try %d)", retry+1), resp.StatusCode)
+		c.log("Visit Homepage", resp.StatusCode)
 
 		if resp.StatusCode == 200 || resp.StatusCode == 302 || resp.StatusCode == 307 {
 			resp.Body.Close()
@@ -193,20 +193,34 @@ func (c *Client) authCallback(emailAddr, hashedOtp, rawOtp string) error {
 
 	cbURL := authURL + "/api/auth/callback/email?" + params.Encode()
 
-	req, _ := http.NewRequest("GET", cbURL, nil)
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-	req.Header.Set("Referer", authURL+"/")
-	req.Header.Set("Upgrade-Insecure-Requests", "1")
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			c.randomDelay(float64(attempt*3), float64(attempt*5))
+		}
 
-	resp, err := c.do(req)
-	if err != nil {
-		return fmt.Errorf("auth callback request failed: %w", err)
+		req, _ := http.NewRequest("GET", cbURL, nil)
+		req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+		req.Header.Set("Referer", authURL+"/")
+		req.Header.Set("Upgrade-Insecure-Requests", "1")
+
+		resp, err := c.do(req)
+		if err != nil {
+			return fmt.Errorf("auth callback request failed: %w", err)
+		}
+		resp.Body.Close()
+
+		c.log("Auth Callback", resp.StatusCode)
+
+		if resp.StatusCode == 200 || resp.StatusCode == 302 {
+			return nil
+		}
+		if resp.StatusCode != 429 {
+			return fmt.Errorf("auth callback failed (status %d)", resp.StatusCode)
+		}
+		c.print(fmt.Sprintf("Auth callback rate limited, waiting before retry %d/3...", attempt+1))
 	}
-	defer resp.Body.Close()
 
-	c.log("Auth Callback", resp.StatusCode)
-
-	return nil
+	return fmt.Errorf("auth callback failed after 3 retries (rate limited)")
 }
 
 // RunRegister performs the full exa.ai registration flow.
@@ -266,13 +280,13 @@ func (c *Client) RunRegister(emailAddr string) error {
 	}
 
 	// Step 7: Auth callback to establish dashboard session cookie
-	c.randomDelay(0.3, 0.8)
+	c.randomDelay(2.0, 4.0)
 	if err := c.authCallback(emailAddr, otpResp.HashedOtp, otpResp.RawOtp); err != nil {
 		return fmt.Errorf("auth callback failed: %w", err)
 	}
 
 	// Step 8: Complete onboarding
-	c.randomDelay(0.5, 1.5)
+	c.randomDelay(2.0, 4.0)
 	if err := c.completeOnboarding(); err != nil {
 		return fmt.Errorf("onboarding failed: %w", err)
 	}
@@ -292,26 +306,37 @@ func (c *Client) completeOnboarding() error {
 	}
 	jsonPayload, _ := json.Marshal(payload)
 
-	req, _ := http.NewRequest("POST", dashboardURL+"/api/onboarding/complete", strings.NewReader(string(jsonPayload)))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "*/*")
-	req.Header.Set("Referer", dashboardURL+"/onboarding")
-	req.Header.Set("Origin", dashboardURL)
+	for attempt := 0; attempt < 5; attempt++ {
+		if attempt > 0 {
+			c.randomDelay(float64(attempt*5), float64(attempt*8))
+		}
 
-	resp, err := c.do(req)
-	if err != nil {
-		return fmt.Errorf("onboarding request failed: %w", err)
+		req, _ := http.NewRequest("POST", dashboardURL+"/api/onboarding/complete", strings.NewReader(string(jsonPayload)))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "*/*")
+		req.Header.Set("Referer", dashboardURL+"/onboarding")
+		req.Header.Set("Origin", dashboardURL)
+
+		resp, err := c.do(req)
+		if err != nil {
+			return fmt.Errorf("onboarding request failed: %w", err)
+		}
+
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		c.log("Complete Onboarding", resp.StatusCode)
+
+		if resp.StatusCode == 200 {
+			return nil
+		}
+		if resp.StatusCode != 429 {
+			return fmt.Errorf("onboarding failed (status %d): %s", resp.StatusCode, truncateBody(string(body), 200))
+		}
+		c.print(fmt.Sprintf("Onboarding rate limited, waiting before retry %d/5...", attempt+1))
 	}
-	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
-	c.log("Complete Onboarding", resp.StatusCode)
-
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("onboarding failed (status %d): %s", resp.StatusCode, truncateBody(string(body), 200))
-	}
-
-	return nil
+	return fmt.Errorf("onboarding failed after 5 retries (rate limited)")
 }
 
 // GetAPIKey retrieves the API key from dashboard.exa.ai (public wrapper).
@@ -320,37 +345,51 @@ func (c *Client) GetAPIKey() (string, error) {
 }
 
 func (c *Client) getAPIKey() (string, error) {
-	req, _ := http.NewRequest("GET", dashboardURL+"/api/get-api-keys", nil)
-	req.Header.Set("Accept", "*/*")
-	req.Header.Set("Referer", dashboardURL+"/")
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			c.randomDelay(float64(attempt*3), float64(attempt*5))
+		}
 
-	resp, err := c.do(req)
-	if err != nil {
-		return "", fmt.Errorf("get api keys request failed: %w", err)
+		req, _ := http.NewRequest("GET", dashboardURL+"/api/get-api-keys", nil)
+		req.Header.Set("Accept", "*/*")
+		req.Header.Set("Referer", dashboardURL+"/")
+
+		resp, err := c.do(req)
+		if err != nil {
+			return "", fmt.Errorf("get api keys request failed: %w", err)
+		}
+
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		c.log("Get API Keys", resp.StatusCode)
+
+		if resp.StatusCode == 429 {
+			c.print(fmt.Sprintf("Get API keys rate limited, waiting before retry %d/3...", attempt+1))
+			continue
+		}
+
+		if resp.StatusCode != 200 {
+			return "", fmt.Errorf("get api keys failed (status %d): %s", resp.StatusCode, truncateBody(string(body), 200))
+		}
+
+		var data struct {
+			APIKeys []struct {
+				ID string `json:"id"`
+			} `json:"apiKeys"`
+		}
+		if err := json.Unmarshal(body, &data); err != nil {
+			return "", fmt.Errorf("failed to parse api keys response: %w", err)
+		}
+
+		if len(data.APIKeys) == 0 {
+			return "", fmt.Errorf("no api keys found in response")
+		}
+
+		return data.APIKeys[0].ID, nil
 	}
-	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
-	c.log("Get API Keys", resp.StatusCode)
-
-	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("get api keys failed (status %d): %s", resp.StatusCode, truncateBody(string(body), 200))
-	}
-
-	var data struct {
-		APIKeys []struct {
-			ID string `json:"id"`
-		} `json:"apiKeys"`
-	}
-	if err := json.Unmarshal(body, &data); err != nil {
-		return "", fmt.Errorf("failed to parse api keys response: %w", err)
-	}
-
-	if len(data.APIKeys) == 0 {
-		return "", fmt.Errorf("no api keys found in response")
-	}
-
-	return data.APIKeys[0].ID, nil
+	return "", fmt.Errorf("get api keys failed after 3 retries (rate limited)")
 }
 
 func (c *Client) randomDelay(low, high float64) {

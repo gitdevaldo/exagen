@@ -177,19 +177,37 @@ func GetVerificationCode(emailAddr string, maxRetries int, delay time.Duration) 
 		}
 
 		otp := ""
-		doc.Find("#email-table > div.e7m.list-group-item.list-group-item-info > div.e7m.subj_div_45g45gg").EachWithBreak(func(i int, s *goquery.Selection) bool {
+
+		// Search the email body content for OTP
+		doc.Find("div.e7m.mess_bodiyy").EachWithBreak(func(i int, s *goquery.Selection) bool {
 			text := s.Text()
-			matches := otpRegex.FindStringSubmatch(text)
-			if len(matches) > 0 {
-				code := matches[0]
+			matches := otpRegex.FindAllString(text, -1)
+			for _, code := range matches {
 				if code == "177010" {
-					return true
+					continue
 				}
 				otp = code
 				return false
 			}
 			return true
 		})
+
+		// Fallback: search subject line divs
+		if otp == "" {
+			doc.Find("#email-table > div.e7m.list-group-item.list-group-item-info > div.e7m.subj_div_45g45gg").EachWithBreak(func(i int, s *goquery.Selection) bool {
+				text := s.Text()
+				matches := otpRegex.FindStringSubmatch(text)
+				if len(matches) > 0 {
+					code := matches[0]
+					if code == "177010" {
+						return true
+					}
+					otp = code
+					return false
+				}
+				return true
+			})
+		}
 
 		if otp != "" {
 			return otp, nil

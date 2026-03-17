@@ -6,13 +6,13 @@ import (
 	"io"
 	"math/rand"
 	"net/url"
+	"os/exec"
 	"strings"
 	"time"
 
 	http "github.com/bogdanfinn/fhttp"
 
 	"github.com/exagen-creator/exagen/internal/email"
-	"github.com/exagen-creator/exagen/internal/vercel"
 )
 
 // callbackURL is the URL that auth.exa.ai redirects to after successful authentication.
@@ -302,13 +302,8 @@ func (c *Client) RunRegister(emailAddr, vcrcsCookie string) error {
 
 	// Step 8: Visit dashboard / handle Vercel challenge
 	c.randomDelay(1.0, 2.0)
-	if vcrcsCookie != "" {
-		// Cookie provided, skip dashboard page visit and go straight to API
-		c.print("Using provided Vercel cookie, skipping dashboard page visit")
-	} else {
-		if err := c.visitDashboard(); err != nil {
-			return fmt.Errorf("visit dashboard failed: %w", err)
-		}
+	if err := c.visitDashboard(); err != nil {
+		return fmt.Errorf("visit dashboard failed: %w", err)
 	}
 
 	// Step 9: Complete onboarding
@@ -340,26 +335,36 @@ func (c *Client) visitDashboard() error {
 	}
 
 	// Extract challenge token from response header
-	challengeToken := resp.Header.Get("x-vercel-challenge-token")
+	challengeToken := resp.Header.Get("X-Vercel-Challenge-Token")
 	if challengeToken == "" {
-		return fmt.Errorf("vercel 429 but no x-vercel-challenge-token header found")
+		return fmt.Errorf("vercel 429 but no x-vercel-challenge-token header")
 	}
 
-	c.print(fmt.Sprintf("Vercel challenge token received (len=%d), solving...", len(challengeToken)))
+	c.print("Solving Vercel challenge via WASM...")
 
-	// Solve the proof-of-work
-	solution, err := vercel.SolveChallenge(challengeToken)
+	// Shell out to Node.js to solve the challenge using the WASM
+	cmd := exec.Command("node", "solve_challenge.js", challengeToken)
+	output, err := cmd.Output()
 	if err != nil {
-		return fmt.Errorf("failed to solve vercel challenge: %w", err)
+		return fmt.Errorf("vercel challenge solver failed: %w", err)
 	}
 
-	c.print(fmt.Sprintf("Challenge solved: %s", solution))
+	var solverResult struct {
+		Solution string `json:"solution"`
+		Token    string `json:"token"`
+		Version  string `json:"version"`
+	}
+	if err := json.Unmarshal(output, &solverResult); err != nil {
+		return fmt.Errorf("failed to parse solver output: %w (output: %s)", err, truncateBody(string(output), 200))
+	}
 
-	// Submit the solution
+	c.print(fmt.Sprintf("Challenge solved: %s", solverResult.Solution))
+
+	// Submit the solution via our TLS client
 	submitReq, _ := http.NewRequest("POST", dashboardURL+"/.well-known/vercel/security/request-challenge", nil)
-	submitReq.Header.Set("x-vercel-challenge-token", challengeToken)
-	submitReq.Header.Set("x-vercel-challenge-solution", solution)
-	submitReq.Header.Set("x-vercel-challenge-version", "2")
+	submitReq.Header.Set("X-Vercel-Challenge-Token", solverResult.Token)
+	submitReq.Header.Set("X-Vercel-Challenge-Solution", solverResult.Solution)
+	submitReq.Header.Set("X-Vercel-Challenge-Version", solverResult.Version)
 	submitReq.Header.Set("Accept", "*/*")
 	submitReq.Header.Set("Origin", dashboardURL)
 	submitReq.Header.Set("Referer", dashboardURL+"/.well-known/vercel/security/static/challenge.v2.min.js")
@@ -376,7 +381,7 @@ func (c *Client) visitDashboard() error {
 	c.log("Vercel Challenge Submit", submitResp.StatusCode)
 
 	if submitResp.StatusCode != 204 && submitResp.StatusCode != 200 {
-		return fmt.Errorf("vercel challenge submission failed (status %d)", submitResp.StatusCode)
+		return fmt.Errorf("vercel challenge submission returned status %d", submitResp.StatusCode)
 	}
 
 	c.print("Vercel challenge passed!")

@@ -1,7 +1,7 @@
 package vercel
 
 import (
-	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
@@ -29,7 +29,7 @@ func SolveChallenge(challengeToken string) (string, error) {
 		}
 	}
 
-	// Split on semicolons - first 4 fields are text, 5th is binary
+	// Split on semicolons - first 4 fields are text, rest may be binary
 	fields := strings.SplitN(string(decoded), ";", 5)
 	if len(fields) < 4 {
 		return "", fmt.Errorf("invalid decoded payload: expected at least 4 fields, got %d", len(fields))
@@ -44,8 +44,7 @@ func SolveChallenge(challengeToken string) (string, error) {
 		return "", fmt.Errorf("invalid iterations count: %d", iterations)
 	}
 
-	// The prefix length to match -- use the suffix length as a hint
-	// The suffix is typically 8 hex chars, and the prefix to match is also 8 chars
+	// Use suffix length as the prefix match length (typically 8 hex chars)
 	prefixLen := len(suffix)
 	if prefixLen > len(startHash) {
 		prefixLen = len(startHash)
@@ -62,7 +61,7 @@ func SolveChallenge(challengeToken string) (string, error) {
 			return "", fmt.Errorf("failed at iteration %d: %w", i, err)
 		}
 		keys = append(keys, key)
-		// Next prefix is from the tail of the hash
+		// Next prefix is from the tail of the hash, same length
 		currentPrefix = hash[len(hash)-prefixLen:]
 	}
 
@@ -70,12 +69,12 @@ func SolveChallenge(challengeToken string) (string, error) {
 }
 
 // findMatchingKey brute-forces a random 8-byte key (16 hex chars) such that
-// sha1(suffix + key_hex) starts with requiredPrefix.
+// sha256(suffix + key) starts with requiredPrefix.
 func findMatchingKey(suffix, requiredPrefix string, r *rand.Rand) (string, string, error) {
 	const maxAttempts = 50_000_000
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		key := randomHex(r, 16)
-		hash := sha1Hex(suffix + key)
+		hash := sha256Hex(suffix + key)
 		if strings.HasPrefix(hash, requiredPrefix) {
 			return key, hash, nil
 		}
@@ -83,8 +82,8 @@ func findMatchingKey(suffix, requiredPrefix string, r *rand.Rand) (string, strin
 	return "", "", fmt.Errorf("failed to find matching key after %d attempts (prefix len: %d)", maxAttempts, len(requiredPrefix))
 }
 
-func sha1Hex(input string) string {
-	h := sha1.Sum([]byte(input))
+func sha256Hex(input string) string {
+	h := sha256.Sum256([]byte(input))
 	return hex.EncodeToString(h[:])
 }
 
@@ -95,29 +94,4 @@ func randomHex(r *rand.Rand, length int) string {
 		b[i] = hexChars[r.Intn(16)]
 	}
 	return string(b)
-}
-
-// ExtractChallengeToken extracts the challenge token from the 429 HTML response.
-// It looks for the token in various formats used by Vercel's challenge pages.
-func ExtractChallengeToken(body string) (string, error) {
-	// Try v2: look for data attribute or JS variable containing the token
-	markers := []string{
-		`window._vcrct="`,
-		`data-challenge="`,
-		`"challengeToken":"`,
-		`challenge-token" content="`,
-	}
-
-	for _, marker := range markers {
-		idx := strings.Index(body, marker)
-		if idx != -1 {
-			start := idx + len(marker)
-			end := strings.Index(body[start:], `"`)
-			if end != -1 {
-				return body[start : start+end], nil
-			}
-		}
-	}
-
-	return "", fmt.Errorf("challenge token not found in response body")
 }

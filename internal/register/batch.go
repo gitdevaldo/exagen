@@ -12,7 +12,7 @@ import (
 )
 
 // registerOne handles a single account registration.
-func registerOne(workerID int, tag string, proxy, outputFile, defaultDomain string, printMu, fileMu *sync.Mutex) (bool, string, string) {
+func registerOne(workerID int, tag string, proxy, outputFile, defaultDomain, vcrcsCookie string, printMu, fileMu *sync.Mutex) (bool, string, string) {
 	client, err := NewClient(proxy, tag, workerID, printMu, fileMu)
 	if err != nil {
 		return false, "", fmt.Sprintf("failed to create client: %v", err)
@@ -25,7 +25,7 @@ func registerOne(workerID int, tag string, proxy, outputFile, defaultDomain stri
 
 	client.print(fmt.Sprintf("Starting registration for %s", emailAddr))
 
-	err = client.RunRegister(emailAddr)
+	err = client.RunRegister(emailAddr, vcrcsCookie)
 	if err != nil {
 		return false, emailAddr, err.Error()
 	}
@@ -57,7 +57,7 @@ func registerOne(workerID int, tag string, proxy, outputFile, defaultDomain stri
 }
 
 // RunBatch runs concurrent registration tasks until target success count is reached.
-func RunBatch(totalAccounts int, outputFile string, maxWorkers int, proxy, defaultDomain string) {
+func RunBatch(totalAccounts int, outputFile string, maxWorkers int, proxy, defaultDomain, vcrcsCookie string) {
 	var printMu sync.Mutex
 	var fileMu sync.Mutex
 
@@ -82,7 +82,7 @@ func RunBatch(totalAccounts int, outputFile string, maxWorkers int, proxy, defau
 				cur := atomic.LoadInt64(&successCount) + 1
 				tag := fmt.Sprintf("%d/%d", cur, totalAccounts)
 
-				success, emailAddr, errStr := registerOne(workerID, tag, proxy, outputFile, defaultDomain, &printMu, &fileMu)
+				success, emailAddr, errStr := registerOne(workerID, tag, proxy, outputFile, defaultDomain, vcrcsCookie, &printMu, &fileMu)
 				if success {
 					atomic.AddInt64(&successCount, 1)
 					ts := time.Now().Format("15:04:05")

@@ -225,8 +225,22 @@ func (c *Client) authCallback(emailAddr, hashedOtp, rawOtp string) error {
 }
 
 // RunRegister performs the full exa.ai registration flow.
-func (c *Client) RunRegister(emailAddr string) error {
+func (c *Client) RunRegister(emailAddr, vcrcsCookie string) error {
 	c.print("Starting registration flow...")
+
+	// Inject _vcrcs cookie for dashboard.exa.ai if provided
+	if vcrcsCookie != "" {
+		dashURL, _ := url.Parse(dashboardURL)
+		c.session.GetCookieJar().SetCookies(dashURL, []*http.Cookie{
+			{
+				Name:   "_vcrcs",
+				Value:  vcrcsCookie,
+				Domain: "dashboard.exa.ai",
+				Path:   "/",
+			},
+		})
+		c.print("Injected Vercel _vcrcs cookie")
+	}
 
 	// Step 1: Visit exa.ai homepage to initialize session
 	if err := c.visitHomepage(); err != nil {

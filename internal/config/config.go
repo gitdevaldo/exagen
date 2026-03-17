@@ -10,6 +10,7 @@ type Config struct {
 	Proxy         string `json:"proxy"`
 	OutputFile    string `json:"output_file"`
 	DefaultDomain string `json:"default_domain"`
+	VcrcsCookie   string `json:"vcrcs_cookie"`
 }
 
 const (

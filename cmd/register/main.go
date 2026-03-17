@@ -81,11 +81,14 @@ func main() {
 	} else {
 		fmt.Printf("  Domain:         (random)\n")
 	}
+	if cfg.VcrcsCookie != "" {
+		fmt.Printf("  Vercel Cookie:  %s...%s\n", cfg.VcrcsCookie[:10], cfg.VcrcsCookie[len(cfg.VcrcsCookie)-10:])
+	}
 	fmt.Printf("  Output File:    %s\n", cfg.OutputFile)
 	fmt.Println("-------------------------------------------")
 	fmt.Println()
 
-	register.RunBatch(totalAccounts, cfg.OutputFile, maxWorkers, proxy, defaultDomain)
+	register.RunBatch(totalAccounts, cfg.OutputFile, maxWorkers, proxy, defaultDomain, cfg.VcrcsCookie)
 }
 
 func printBanner() {

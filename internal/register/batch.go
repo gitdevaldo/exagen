@@ -3,6 +3,7 @@ package register
 import (
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -17,15 +18,14 @@ func registerOne(workerID int, tag string, proxy, outputFile, defaultDomain stri
 		return false, "", fmt.Sprintf("failed to create client: %v", err)
 	}
 
-	inbox, err := email.CreateTempEmail(defaultDomain)
+	emailAddr, err := email.CreateTempEmail(defaultDomain)
 	if err != nil {
 		return false, "", fmt.Sprintf("failed to create temp email: %v", err)
 	}
 
-	emailAddr := inbox.Address
 	client.print(fmt.Sprintf("Starting registration for %s", emailAddr))
 
-	err = client.RunRegister(emailAddr, inbox)
+	err = client.RunRegister(emailAddr)
 	if err != nil {
 		return false, emailAddr, err.Error()
 	}
@@ -56,10 +56,8 @@ func registerOne(workerID int, tag string, proxy, outputFile, defaultDomain stri
 	return true, emailAddr, ""
 }
 
-// RunBatch runs concurrent registration tasks with retry until target success count is reached.
+// RunBatch runs concurrent registration tasks until target success count is reached.
 func RunBatch(totalAccounts int, outputFile string, maxWorkers int, proxy, defaultDomain string) {
-	const maxRetries = 3
-
 	var printMu sync.Mutex
 	var fileMu sync.Mutex
 
@@ -84,23 +82,7 @@ func RunBatch(totalAccounts int, outputFile string, maxWorkers int, proxy, defau
 				cur := atomic.LoadInt64(&successCount) + 1
 				tag := fmt.Sprintf("%d/%d", cur, totalAccounts)
 
-				var success bool
-				var emailAddr, errStr string
-				for retry := 0; retry <= maxRetries; retry++ {
-					if retry > 0 {
-						printMu.Lock()
-						ts := time.Now().Format("15:04:05")
-						fmt.Printf("[%s] [W%d] Retry %d/%d for slot %s\n", ts, workerID, retry, maxRetries, tag)
-						printMu.Unlock()
-						time.Sleep(time.Duration(retry) * 2 * time.Second)
-					}
-
-					success, emailAddr, errStr = registerOne(workerID, tag, proxy, outputFile, defaultDomain, &printMu, &fileMu)
-					if success {
-						break
-					}
-				}
-
+				success, emailAddr, errStr := registerOne(workerID, tag, proxy, outputFile, defaultDomain, &printMu, &fileMu)
 				if success {
 					atomic.AddInt64(&successCount, 1)
 					ts := time.Now().Format("15:04:05")
@@ -112,8 +94,19 @@ func RunBatch(totalAccounts int, outputFile string, maxWorkers int, proxy, defau
 					atomic.AddInt64(&remaining, 1)
 					ts := time.Now().Format("15:04:05")
 
+					if strings.Contains(errStr, "unsupported domain") {
+						parts := strings.Split(emailAddr, "@")
+						if len(parts) == 2 {
+							domain := parts[1]
+							email.AddBlacklistDomain(domain)
+							printMu.Lock()
+							fmt.Printf("[%s] [W%d] Blacklisted domain: %s\n", ts, workerID, domain)
+							printMu.Unlock()
+						}
+					}
+
 					printMu.Lock()
-					fmt.Printf("[%s] [W%d] FAILED after %d retries: %s | %s\n", ts, workerID, maxRetries, emailAddr, errStr)
+					fmt.Printf("[%s] [W%d] FAILURE: %s | %s\n", ts, workerID, emailAddr, errStr)
 					printMu.Unlock()
 				}
 			}

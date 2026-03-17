@@ -3,238 +3,200 @@ package email
 import (
 	"encoding/json"
 	"fmt"
-	"io"
+	"math/rand"
+	"os"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/PuerkitoBio/goquery"
 	fhttp "github.com/bogdanfinn/fhttp"
 	tls_client "github.com/bogdanfinn/tls-client"
 	"github.com/bogdanfinn/tls-client/profiles"
+	"github.com/brianvoe/gofakeit/v7"
+
+	"github.com/exagen-creator/exagen/internal/util"
 )
 
-const mailAPIBase = "https://api.mail.tm"
+var (
+	blacklistedDomains sync.Map
+	blacklistMutex     sync.Mutex
+)
 
-// Inbox holds the state for a mail.tm temporary inbox.
-type Inbox struct {
-	Address  string
-	Password string
-	Token    string
-	client   tls_client.HttpClient
+func init() {
+	data, err := os.ReadFile("blacklist.json")
+	if err != nil {
+		return
+	}
+
+	var domains []string
+	if err := json.Unmarshal(data, &domains); err != nil {
+		return
+	}
+
+	for _, domain := range domains {
+		blacklistedDomains.Store(domain, true)
+	}
 }
 
-// newTLSClient creates a TLS client for mail.tm API calls.
-func newTLSClient() (tls_client.HttpClient, error) {
+func saveBlacklist() {
+	blacklistMutex.Lock()
+	defer blacklistMutex.Unlock()
+
+	var domains []string
+	blacklistedDomains.Range(func(key, value any) bool {
+		if domain, ok := key.(string); ok {
+			domains = append(domains, domain)
+		}
+		return true
+	})
+
+	data, err := json.MarshalIndent(domains, "", "  ")
+	if err != nil {
+		return
+	}
+
+	_ = os.WriteFile("blacklist.json", data, 0644)
+}
+
+// AddBlacklistDomain adds a domain to the global blacklist.
+func AddBlacklistDomain(domain string) {
+	blacklistedDomains.Store(domain, true)
+	saveBlacklist()
+}
+
+// CreateTempEmail fetches a new temp email using a random profile and gofakeit names.
+func CreateTempEmail(defaultDomain string) (string, error) {
+	if defaultDomain != "" {
+		firstName := gofakeit.FirstName()
+		lastName := gofakeit.LastName()
+		email := strings.ToLower(firstName+lastName+util.RandStr(5)) + "@" + defaultDomain
+		return email, nil
+	}
+
 	options := []tls_client.HttpClientOption{
 		tls_client.WithClientProfile(profiles.Chrome_131),
 	}
-	return tls_client.NewHttpClient(tls_client.NewNoopLogger(), options...)
-}
 
-// GetAvailableDomain fetches a usable domain from mail.tm.
-func GetAvailableDomain() (string, error) {
-	client, err := newTLSClient()
+	client, err := tls_client.NewHttpClient(tls_client.NewNoopLogger(), options...)
 	if err != nil {
 		return "", fmt.Errorf("failed to create tls client: %w", err)
 	}
 
-	req, _ := fhttp.NewRequest("GET", mailAPIBase+"/domains", nil)
-	req.Header.Set("Accept", "application/json")
+	req, err := fhttp.NewRequest("GET", "https://generator.email/", nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to create request: %w", err)
+	}
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("failed to fetch domains: %w", err)
+		return "", fmt.Errorf("failed to fetch generator.email: %w", err)
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
-
-	// mail.tm returns a plain JSON array
-	var domains []struct {
-		Domain   string `json:"domain"`
-		IsActive bool   `json:"isActive"`
-	}
-	json.Unmarshal(body, &domains)
-
-	for _, d := range domains {
-		if d.IsActive {
-			return d.Domain, nil
-		}
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("generator.email returned status: %d", resp.StatusCode)
 	}
 
-	return "", fmt.Errorf("no active domains available from mail.tm")
-}
-
-// CreateTempEmail creates a new mail.tm inbox and returns the Inbox handle.
-// Retries up to 5 times with backoff on 429 rate limiting.
-func CreateTempEmail(defaultDomain string) (*Inbox, error) {
-	client, err := newTLSClient()
+	doc, err := goquery.NewDocumentFromReader(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create tls client: %w", err)
+		return "", fmt.Errorf("failed to parse HTML: %w", err)
 	}
 
-	domain := defaultDomain
-	if domain == "" {
-		d, err := GetAvailableDomain()
-		if err != nil {
-			return nil, err
+	domains := []string{"smartmail.de", "enayu.com", "crazymailing.com"}
+	doc.Find(".e7m.tt-suggestions div > p").Each(func(i int, s *goquery.Selection) {
+		domain := strings.TrimSpace(s.Text())
+		if domain != "" {
+			if _, blacklisted := blacklistedDomains.Load(domain); !blacklisted {
+				domains = append(domains, domain)
+			}
 		}
-		domain = d
-	}
-
-	address := fmt.Sprintf("exa%d@%s", time.Now().UnixNano(), domain)
-	password := "ExaReg2026!"
-
-	// Create account with retry on 429
-	payload, _ := json.Marshal(map[string]string{
-		"address":  address,
-		"password": password,
 	})
 
-	var resp *fhttp.Response
-	var body []byte
-	for attempt := 0; attempt < 5; attempt++ {
-		if attempt > 0 {
-			time.Sleep(time.Duration(attempt*3) * time.Second)
-		}
-
-		req, _ := fhttp.NewRequest("POST", mailAPIBase+"/accounts", strings.NewReader(string(payload)))
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Accept", "application/json")
-
-		resp, err = client.Do(req)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create mail.tm account: %w", err)
-		}
-
-		body, _ = io.ReadAll(resp.Body)
-		resp.Body.Close()
-
-		if resp.StatusCode == 201 {
-			break
-		}
-		if resp.StatusCode != 429 {
-			return nil, fmt.Errorf("mail.tm account creation failed (status %d): %s", resp.StatusCode, string(body))
-		}
-	}
-	if resp.StatusCode != 201 {
-		return nil, fmt.Errorf("mail.tm account creation failed after retries (status %d): %s", resp.StatusCode, string(body))
+	if len(domains) == 0 {
+		return "", fmt.Errorf("all available domains are blacklisted")
 	}
 
-	// Get auth token
-	tokenPayload, _ := json.Marshal(map[string]string{
-		"address":  address,
-		"password": password,
-	})
+	r := rand.New(rand.NewSource(time.Now().UnixNano()))
+	randomDomain := domains[r.Intn(len(domains))]
 
-	reqToken, _ := fhttp.NewRequest("POST", mailAPIBase+"/token", strings.NewReader(string(tokenPayload)))
-	reqToken.Header.Set("Content-Type", "application/json")
-	reqToken.Header.Set("Accept", "application/json")
+	firstName := gofakeit.FirstName()
+	lastName := gofakeit.LastName()
+	email := strings.ToLower(firstName+lastName+util.RandStr(5)) + "@" + randomDomain
 
-	respToken, err := client.Do(reqToken)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get mail.tm token: %w", err)
-	}
-	defer respToken.Body.Close()
-
-	tokenBody, _ := io.ReadAll(respToken.Body)
-	if respToken.StatusCode != 200 {
-		return nil, fmt.Errorf("mail.tm token request failed (status %d): %s", respToken.StatusCode, string(tokenBody))
-	}
-
-	var tokenResp struct {
-		Token string `json:"token"`
-	}
-	if err := json.Unmarshal(tokenBody, &tokenResp); err != nil {
-		return nil, fmt.Errorf("failed to parse mail.tm token: %w", err)
-	}
-
-	return &Inbox{
-		Address:  address,
-		Password: password,
-		Token:    tokenResp.Token,
-		client:   client,
-	}, nil
+	return email, nil
 }
 
-// GetVerificationCode polls the mail.tm inbox for an OTP code from Exa.
-func (inbox *Inbox) GetVerificationCode(maxRetries int, delay time.Duration) (string, error) {
+// GetVerificationCode polls generator.email for the OTP using a custom cookie.
+func GetVerificationCode(emailAddr string, maxRetries int, delay time.Duration) (string, error) {
+	parts := strings.Split(emailAddr, "@")
+	if len(parts) != 2 {
+		return "", fmt.Errorf("invalid email format: %s", emailAddr)
+	}
+	username := parts[0]
+	domain := parts[1]
+
 	otpRegex := regexp.MustCompile(`\d{6}`)
 
 	for i := 0; i < maxRetries; i++ {
-		time.Sleep(delay)
+		options := []tls_client.HttpClientOption{
+			tls_client.WithClientProfile(profiles.Chrome_131),
+		}
 
-		req, _ := fhttp.NewRequest("GET", mailAPIBase+"/messages", nil)
-		req.Header.Set("Authorization", "Bearer "+inbox.Token)
-		req.Header.Set("Accept", "application/json")
-
-		resp, err := inbox.client.Do(req)
+		client, err := tls_client.NewHttpClient(tls_client.NewNoopLogger(), options...)
 		if err != nil {
+			return "", fmt.Errorf("failed to create tls client: %w", err)
+		}
+
+		url := fmt.Sprintf("https://generator.email/%s/%s", domain, username)
+		req, err := fhttp.NewRequest("GET", url, nil)
+		if err != nil {
+			return "", fmt.Errorf("failed to create request: %w", err)
+		}
+
+		req.Header.Set("Cookie", fmt.Sprintf("surl=%s/%s", domain, username))
+
+		resp, err := client.Do(req)
+		if err != nil {
+			time.Sleep(delay)
 			continue
 		}
 
-		body, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != 200 {
+			resp.Body.Close()
+			time.Sleep(delay)
+			continue
+		}
+
+		doc, err := goquery.NewDocumentFromReader(resp.Body)
 		resp.Body.Close()
-
-		// mail.tm returns a plain JSON array of messages
-		var messages []struct {
-			ID    string `json:"id"`
-			Intro string `json:"intro"`
-			From  struct {
-				Address string `json:"address"`
-			} `json:"from"`
+		if err != nil {
+			time.Sleep(delay)
+			continue
 		}
-		json.Unmarshal(body, &messages)
 
-		for _, msg := range messages {
-			// Look for OTP in the intro field ("Your verification code for Exa is: 123456")
-			matches := otpRegex.FindStringSubmatch(msg.Intro)
+		otp := ""
+		doc.Find("#email-table > div.e7m.list-group-item.list-group-item-info > div.e7m.subj_div_45g45gg").EachWithBreak(func(i int, s *goquery.Selection) bool {
+			text := s.Text()
+			matches := otpRegex.FindStringSubmatch(text)
 			if len(matches) > 0 {
-				return matches[0], nil
+				code := matches[0]
+				if code == "177010" {
+					return true
+				}
+				otp = code
+				return false
 			}
+			return true
+		})
 
-			// If not in intro, fetch full message and search text body
-			code, err := inbox.fetchOTPFromMessage(msg.ID, otpRegex)
-			if err == nil && code != "" {
-				return code, nil
-			}
+		if otp != "" {
+			return otp, nil
 		}
+
+		time.Sleep(delay)
 	}
 
 	return "", fmt.Errorf("failed to get verification code after %d retries", maxRetries)
-}
-
-// fetchOTPFromMessage fetches a full message and extracts the OTP code.
-func (inbox *Inbox) fetchOTPFromMessage(messageID string, otpRegex *regexp.Regexp) (string, error) {
-	req, _ := fhttp.NewRequest("GET", mailAPIBase+"/messages/"+messageID, nil)
-	req.Header.Set("Authorization", "Bearer "+inbox.Token)
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := inbox.client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-
-	var msg struct {
-		Text string   `json:"text"`
-		HTML []string `json:"html"`
-	}
-	json.Unmarshal(body, &msg)
-
-	// Search text body
-	if matches := otpRegex.FindStringSubmatch(msg.Text); len(matches) > 0 {
-		return matches[0], nil
-	}
-
-	// Search HTML body
-	for _, html := range msg.HTML {
-		if matches := otpRegex.FindStringSubmatch(html); len(matches) > 0 {
-			return matches[0], nil
-		}
-	}
-
-	return "", fmt.Errorf("no OTP found in message %s", messageID)
 }

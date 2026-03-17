@@ -210,7 +210,7 @@ func (c *Client) authCallback(emailAddr, hashedOtp, rawOtp string) error {
 }
 
 // RunRegister performs the full exa.ai registration flow.
-func (c *Client) RunRegister(emailAddr string, inbox *email.Inbox) error {
+func (c *Client) RunRegister(emailAddr string) error {
 	c.print("Starting registration flow...")
 
 	// Step 1: Visit exa.ai homepage to initialize session
@@ -239,7 +239,7 @@ func (c *Client) RunRegister(emailAddr string, inbox *email.Inbox) error {
 	c.randomDelay(0.5, 1.0)
 
 	// Step 5: Poll for OTP from email
-	otpCode, err := inbox.GetVerificationCode(20, 3*time.Second)
+	otpCode, err := email.GetVerificationCode(emailAddr, 20, 3*time.Second)
 	if err != nil {
 		return err
 	}
@@ -253,7 +253,7 @@ func (c *Client) RunRegister(emailAddr string, inbox *email.Inbox) error {
 		c.print("OTP verification failed, retrying...")
 		c.randomDelay(2.0, 4.0)
 
-		otpCode, err = inbox.GetVerificationCode(10, 3*time.Second)
+		otpCode, err = email.GetVerificationCode(emailAddr, 10, 3*time.Second)
 		if err != nil {
 			return err
 		}

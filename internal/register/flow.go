@@ -301,8 +301,8 @@ func (c *Client) RunRegister(emailAddr, vcrcsCookie string) error {
 	}
 
 	// Step 8: Dashboard operations via Node.js (Vercel challenge + onboarding + API keys)
-	// The auth callback sets next-auth.session-token on .exa.ai domain.
-	// We extract it from the cookie jar and pass it to Node.js.
+	// Node.js gets its own challenge token, solves via WASM, submits to real server,
+	// then does onboarding and gets API keys -- all in one TLS session.
 	c.randomDelay(1.0, 2.0)
 	sessionToken := c.getSessionToken()
 	if sessionToken == "" {

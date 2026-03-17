@@ -66,6 +66,7 @@ func GetAvailableDomain() (string, error) {
 }
 
 // CreateTempEmail creates a new mail.tm inbox and returns the Inbox handle.
+// Retries up to 5 times with backoff on 429 rate limiting.
 func CreateTempEmail(defaultDomain string) (*Inbox, error) {
 	client, err := newTLSClient()
 	if err != nil {
@@ -84,25 +85,40 @@ func CreateTempEmail(defaultDomain string) (*Inbox, error) {
 	address := fmt.Sprintf("exa%d@%s", time.Now().UnixNano(), domain)
 	password := "ExaReg2026!"
 
-	// Create account
+	// Create account with retry on 429
 	payload, _ := json.Marshal(map[string]string{
 		"address":  address,
 		"password": password,
 	})
 
-	req, _ := fhttp.NewRequest("POST", mailAPIBase+"/accounts", strings.NewReader(string(payload)))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
+	var resp *fhttp.Response
+	var body []byte
+	for attempt := 0; attempt < 5; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt*3) * time.Second)
+		}
 
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create mail.tm account: %w", err)
+		req, _ := fhttp.NewRequest("POST", mailAPIBase+"/accounts", strings.NewReader(string(payload)))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json")
+
+		resp, err = client.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create mail.tm account: %w", err)
+		}
+
+		body, _ = io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if resp.StatusCode == 201 {
+			break
+		}
+		if resp.StatusCode != 429 {
+			return nil, fmt.Errorf("mail.tm account creation failed (status %d): %s", resp.StatusCode, string(body))
+		}
 	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 201 {
-		return nil, fmt.Errorf("mail.tm account creation failed (status %d): %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("mail.tm account creation failed after retries (status %d): %s", resp.StatusCode, string(body))
 	}
 
 	// Get auth token

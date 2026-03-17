@@ -124,11 +124,29 @@ func (c *Client) signinEmail(emailAddr, csrf string) error {
 		return fmt.Errorf("signin email failed (status %d): %s", resp.StatusCode, truncateBody(string(body), 200))
 	}
 
+	// Check response body — Exa returns 200 even when email is rejected
+	var data struct {
+		URL string `json:"url"`
+	}
+	json.Unmarshal(body, &data)
+
+	if strings.Contains(data.URL, "error=EmailSignin") {
+		return fmt.Errorf("email rejected by Exa (unsupported domain): %s", emailAddr)
+	}
+
 	return nil
 }
 
+// verifyOTPResponse holds the response from the OTP verification endpoint.
+type verifyOTPResponse struct {
+	RedirectURL string `json:"redirectUrl"`
+	Email       string `json:"email"`
+	HashedOtp   string `json:"hashedOtp"`
+	RawOtp      string `json:"rawOtp"`
+}
+
 // verifyOTP submits the OTP code to auth.exa.ai for verification.
-func (c *Client) verifyOTP(emailAddr, code string) error {
+func (c *Client) verifyOTP(emailAddr, code string) (*verifyOTPResponse, error) {
 	payload := map[string]string{
 		"email": emailAddr,
 		"otp":   code,
@@ -143,7 +161,7 @@ func (c *Client) verifyOTP(emailAddr, code string) error {
 
 	resp, err := c.do(req)
 	if err != nil {
-		return fmt.Errorf("verify otp request failed: %w", err)
+		return nil, fmt.Errorf("verify otp request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -151,8 +169,42 @@ func (c *Client) verifyOTP(emailAddr, code string) error {
 	c.log(fmt.Sprintf("Verify OTP [%s]", code), resp.StatusCode)
 
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("verify otp failed (status %d): %s", resp.StatusCode, truncateBody(string(body), 200))
+		return nil, fmt.Errorf("verify otp failed (status %d): %s", resp.StatusCode, truncateBody(string(body), 200))
 	}
+
+	var data verifyOTPResponse
+	if err := json.Unmarshal(body, &data); err != nil {
+		return nil, fmt.Errorf("failed to parse verify otp response: %w", err)
+	}
+
+	return &data, nil
+}
+
+// authCallback calls the NextAuth email callback to establish the session cookie.
+// This bridges auth.exa.ai -> dashboard.exa.ai by setting next-auth.session-token.
+func (c *Client) authCallback(emailAddr, hashedOtp, rawOtp string) error {
+	// Token format: {hashedOtp}:{rawOtp}
+	token := hashedOtp + ":" + rawOtp
+
+	params := url.Values{}
+	params.Set("email", emailAddr)
+	params.Set("token", token)
+	params.Set("callbackUrl", callbackURL)
+
+	cbURL := authURL + "/api/auth/callback/email?" + params.Encode()
+
+	req, _ := http.NewRequest("GET", cbURL, nil)
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	req.Header.Set("Referer", authURL+"/")
+	req.Header.Set("Upgrade-Insecure-Requests", "1")
+
+	resp, err := c.do(req)
+	if err != nil {
+		return fmt.Errorf("auth callback request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	c.log("Auth Callback", resp.StatusCode)
 
 	return nil
 }
@@ -195,7 +247,8 @@ func (c *Client) RunRegister(emailAddr string, inbox *email.Inbox) error {
 
 	// Step 6: Verify OTP
 	c.randomDelay(0.3, 0.8)
-	if err := c.verifyOTP(emailAddr, otpCode); err != nil {
+	otpResp, err := c.verifyOTP(emailAddr, otpCode)
+	if err != nil {
 		// Retry once on failure
 		c.print("OTP verification failed, retrying...")
 		c.randomDelay(2.0, 4.0)
@@ -206,12 +259,19 @@ func (c *Client) RunRegister(emailAddr string, inbox *email.Inbox) error {
 		}
 
 		c.randomDelay(0.3, 0.8)
-		if err := c.verifyOTP(emailAddr, otpCode); err != nil {
+		otpResp, err = c.verifyOTP(emailAddr, otpCode)
+		if err != nil {
 			return fmt.Errorf("otp verification failed after retry: %w", err)
 		}
 	}
 
-	// Step 7: Complete onboarding
+	// Step 7: Auth callback to establish dashboard session cookie
+	c.randomDelay(0.3, 0.8)
+	if err := c.authCallback(emailAddr, otpResp.HashedOtp, otpResp.RawOtp); err != nil {
+		return fmt.Errorf("auth callback failed: %w", err)
+	}
+
+	// Step 8: Complete onboarding
 	c.randomDelay(0.5, 1.5)
 	if err := c.completeOnboarding(); err != nil {
 		return fmt.Errorf("onboarding failed: %w", err)

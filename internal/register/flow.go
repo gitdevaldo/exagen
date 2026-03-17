@@ -6,7 +6,6 @@ import (
 	"io"
 	"math/rand"
 	"net/url"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -300,17 +299,116 @@ func (c *Client) RunRegister(emailAddr, vcrcsCookie string) error {
 		return fmt.Errorf("auth callback failed: %w", err)
 	}
 
-	// Step 8: Dashboard operations via Node.js (Vercel challenge + onboarding + API keys)
-	// Node.js gets its own challenge token, solves via WASM, submits to real server,
-	// then does onboarding and gets API keys -- all in one TLS session.
+	// Step 8: Visit dashboard (may trigger Vercel challenge)
 	c.randomDelay(1.0, 2.0)
-	sessionToken := c.getSessionToken()
-	if sessionToken == "" {
-		return fmt.Errorf("no next-auth.session-token found after auth callback")
+	if err := c.visitDashboard(); err != nil {
+		return fmt.Errorf("visit dashboard failed: %w", err)
 	}
-	c.print(fmt.Sprintf("Got session token (len=%d), handing off to dashboard helper...", len(sessionToken)))
+
+	// Step 9: Complete onboarding
+	c.randomDelay(2.0, 4.0)
+	if err := c.completeOnboarding(); err != nil {
+		return fmt.Errorf("onboarding failed: %w", err)
+	}
 
 	return nil
+}
+
+// visitDashboard visits dashboard.exa.ai.
+func (c *Client) visitDashboard() error {
+	req, _ := http.NewRequest("GET", dashboardURL+"/", nil)
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
+	req.Header.Set("Referer", authURL+"/")
+	req.Header.Set("Upgrade-Insecure-Requests", "1")
+
+	resp, err := c.do(req)
+	if err != nil {
+		return fmt.Errorf("visit dashboard request failed: %w", err)
+	}
+	resp.Body.Close()
+
+	c.log("Visit Dashboard", resp.StatusCode)
+
+	if resp.StatusCode == 429 {
+		return fmt.Errorf("dashboard returned 429 (Vercel bot protection)")
+	}
+
+	return nil
+}
+
+// completeOnboarding submits the onboarding form on dashboard.exa.ai.
+func (c *Client) completeOnboarding() error {
+	payload := map[string]string{
+		"codingTool":     "claude",
+		"framework":      "mcp",
+		"useCase":        "coding-agent",
+		"prompt":         "using in coding agent",
+		"latencyProfile": "auto",
+		"contentType":    "compact",
+	}
+	jsonPayload, _ := json.Marshal(payload)
+
+	req, _ := http.NewRequest("POST", dashboardURL+"/api/onboarding/complete", strings.NewReader(string(jsonPayload)))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Referer", dashboardURL+"/onboarding")
+	req.Header.Set("Origin", dashboardURL)
+
+	resp, err := c.do(req)
+	if err != nil {
+		return fmt.Errorf("onboarding request failed: %w", err)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	c.log("Complete Onboarding", resp.StatusCode)
+
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("onboarding failed (status %d): %s", resp.StatusCode, truncateBody(string(body), 200))
+	}
+
+	return nil
+}
+
+// GetAPIKey retrieves the API key from dashboard.exa.ai (public wrapper).
+func (c *Client) GetAPIKey() (string, error) {
+	return c.getAPIKey()
+}
+
+func (c *Client) getAPIKey() (string, error) {
+	req, _ := http.NewRequest("GET", dashboardURL+"/api/get-api-keys", nil)
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Referer", dashboardURL+"/")
+
+	resp, err := c.do(req)
+	if err != nil {
+		return "", fmt.Errorf("get api keys request failed: %w", err)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	c.log("Get API Keys", resp.StatusCode)
+
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("get api keys failed (status %d): %s", resp.StatusCode, truncateBody(string(body), 200))
+	}
+
+	var data struct {
+		APIKeys []struct {
+			ID string `json:"id"`
+		} `json:"apiKeys"`
+	}
+	if err := json.Unmarshal(body, &data); err != nil {
+		return "", fmt.Errorf("failed to parse api keys response: %w", err)
+	}
+
+	if len(data.APIKeys) == 0 {
+		return "", fmt.Errorf("no api keys found in response")
+	}
+
+	return data.APIKeys[0].ID, nil
 }
 
 // getSessionToken extracts the next-auth.session-token from the cookie jar.
@@ -336,31 +434,6 @@ func (c *Client) getSessionToken() string {
 		}
 	}
 	return ""
-}
-
-// RunDashboard calls the Node.js dashboard helper to handle Vercel challenge,
-// complete onboarding, and retrieve the API key.
-func (c *Client) RunDashboard(sessionToken string) (string, error) {
-	cmd := exec.Command("node", "dashboard_helper.js", sessionToken)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("dashboard helper failed: %w (output: %s)", err, truncateBody(string(output), 300))
-	}
-
-	var result struct {
-		Success bool   `json:"success"`
-		APIKey  string `json:"apiKey"`
-		Error   string `json:"error"`
-	}
-	if err := json.Unmarshal(output, &result); err != nil {
-		return "", fmt.Errorf("failed to parse dashboard helper output: %w (output: %s)", err, truncateBody(string(output), 200))
-	}
-
-	if !result.Success {
-		return "", fmt.Errorf("dashboard helper error: %s", result.Error)
-	}
-
-	return result.APIKey, nil
 }
 
 func (c *Client) randomDelay(low, high float64) {

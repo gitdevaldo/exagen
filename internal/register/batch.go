@@ -30,18 +30,13 @@ func registerOne(workerID int, tag string, proxy, outputFile, defaultDomain, vcr
 		return false, emailAddr, err.Error()
 	}
 
-	// Dashboard operations via Node.js (Vercel challenge + onboarding + API keys)
-	sessionToken := client.getSessionToken()
-	if sessionToken == "" {
-		return false, emailAddr, "no session token after registration"
-	}
-
-	client.print("Running dashboard helper...")
-	apiKey, err := client.RunDashboard(sessionToken)
+	// Retrieve API key after registration
+	client.randomDelay(0.5, 1.0)
+	apiKey, err := client.GetAPIKey()
 	if err != nil {
-		return false, emailAddr, fmt.Sprintf("dashboard failed: %v", err)
+		client.print(fmt.Sprintf("Warning: failed to get API key: %v", err))
+		apiKey = ""
 	}
-	client.print(fmt.Sprintf("Got API key: %s", apiKey))
 
 	// Append to file: email|apiKey
 	fileMu.Lock()

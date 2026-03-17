@@ -19,7 +19,9 @@ type Profile struct {
 }
 
 var chromeProfiles = []Profile{
-	{131, "chrome131", 6778, 0, 300, "\"Chromium\";v=\"131\", \"Google Chrome\";v=\"131\", \"Not_A Brand\";v=\"24\""},
+	{146, "chrome146", 7876, 0, 200, `"Chromium";v="146", "Not-A.Brand";v="24", "Google Chrome";v="146"`},
+	{144, "chrome144", 7825, 0, 200, `"Chromium";v="144", "Not-A.Brand";v="24", "Google Chrome";v="144"`},
+	{133, "chrome133", 6943, 0, 200, `"Chromium";v="133", "Not-A.Brand";v="24", "Google Chrome";v="133"`},
 }
 
 // RandomChromeVersion selects a random Chrome version profile and returns
@@ -36,11 +38,15 @@ func RandomChromeVersion() (Profile, string, string) {
 // MapToTLSProfile maps an impersonate string to a tls-client ClientProfile.
 func MapToTLSProfile(impersonate string) profiles.ClientProfile {
 	switch impersonate {
-	case "chrome131":
-		return profiles.Chrome_131
+	case "chrome146":
+		return profiles.Chrome_146
+	case "chrome144":
+		return profiles.Chrome_144
 	case "chrome133":
 		return profiles.Chrome_133
+	case "chrome131":
+		return profiles.Chrome_131
 	default:
-		return profiles.Chrome_133
+		return profiles.Chrome_146
 	}
 }
